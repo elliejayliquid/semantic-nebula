@@ -5,6 +5,7 @@ import re
 import sys
 import subprocess
 import importlib.util
+import hmac
 import sqlite3
 import webbrowser
 import shutil
@@ -95,8 +96,20 @@ def _owner_label(mem: dict) -> str:
     owner = normalize_resident_id(mem.get('resident_id'))
     return f" by {owner}" if owner else ""
 
-# Initialize FastMCP server
-mcp = FastMCP("semantic-nebula")
+# Transport: stdio by default (the client launches the server itself).
+# "http" serves Streamable HTTP so one always-on machine can host the shared db.
+_raw_transport = os.environ.get('NEBULA_TRANSPORT', 'stdio').strip().lower()
+TRANSPORT = 'http' if _raw_transport in {'http', 'streamable-http'} else 'stdio'
+if _raw_transport not in {'', 'stdio', 'http', 'streamable-http'}:
+    logger.warning(f"Unknown NEBULA_TRANSPORT '{_raw_transport}', falling back to stdio")
+HTTP_HOST = os.environ.get('NEBULA_HTTP_HOST', '127.0.0.1').strip()
+HTTP_PORT = int(os.environ.get('NEBULA_HTTP_PORT', '8000'))
+AUTH_TOKEN = os.environ.get('NEBULA_AUTH_TOKEN', '').strip() or None
+LOOPBACK_HOSTS = {'127.0.0.1', 'localhost', '::1'}
+
+# Initialize FastMCP server. The host must be known here: FastMCP only allows
+# loopback Host headers when bound to loopback (DNS rebinding protection).
+mcp = FastMCP("semantic-nebula", host=HTTP_HOST, port=HTTP_PORT)
 
 # Get memories directory from environment or use default
 raw_dir = os.environ.get('CLAUDE_MEMORIES_DIR')
@@ -1538,6 +1551,73 @@ def pin_journal_entry(entry_id: str, pinned: bool = True) -> str:
     return f"{action}: {entry_id} ({entry.get('title', 'Untitled')})."
 
 
+class BearerTokenMiddleware:
+    """ASGI wrapper that rejects HTTP requests without the expected bearer token."""
+
+    def __init__(self, app, token: str):
+        self.app = app
+        self.expected = f"Bearer {token}".encode()
+
+    async def __call__(self, scope, receive, send):
+        if scope['type'] == 'http':
+            supplied = dict(scope.get('headers') or []).get(b'authorization', b'')
+            if not hmac.compare_digest(supplied, self.expected):
+                await send({
+                    'type': 'http.response.start',
+                    'status': 401,
+                    'headers': [(b'content-type', b'text/plain'), (b'www-authenticate', b'Bearer')],
+                })
+                await send({'type': 'http.response.body', 'body': b'Unauthorized'})
+                return
+        await self.app(scope, receive, send)
+
+
+class CloseEmptyResponsesMiddleware:
+    """ASGI wrapper that closes the connection after empty-bodied responses.
+
+    Some Windows HTTP filters (seen with Avast's Web Shield) hold an empty
+    response such as MCP's 202 Accepted until the server closes the connection,
+    which stalls every notification by uvicorn's 5s keep-alive timeout.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope['type'] != 'http':
+            await self.app(scope, receive, send)
+            return
+
+        async def send_wrapper(message):
+            if message['type'] == 'http.response.start':
+                headers = list(message.get('headers') or [])
+                if (b'content-length', b'0') in [(k.lower(), v) for k, v in headers]:
+                    message = {**message, 'headers': headers + [(b'connection', b'close')]}
+            await send(message)
+
+        await self.app(scope, receive, send_wrapper)
+
+
+def run_http():
+    """Serve over Streamable HTTP, optionally behind a bearer token."""
+    if not hasattr(mcp, 'streamable_http_app'):
+        print("Error: HTTP transport needs mcp 1.8 or newer. Run: pip install -U \"mcp<2\"", file=sys.stderr)
+        sys.exit(1)
+    import uvicorn
+
+    app = CloseEmptyResponsesMiddleware(mcp.streamable_http_app())
+    if AUTH_TOKEN:
+        app = BearerTokenMiddleware(app, AUTH_TOKEN)
+        logger.info("Bearer token auth enabled")
+    elif HTTP_HOST not in LOOPBACK_HOSTS:
+        logger.warning(
+            f"Listening on {HTTP_HOST} WITHOUT auth: anyone who can reach this port can read "
+            "and change your memories. Set NEBULA_AUTH_TOKEN to require a token."
+        )
+    logger.info(f"Serving MCP over HTTP at http://{HTTP_HOST}:{HTTP_PORT}{mcp.settings.streamable_http_path}")
+    uvicorn.run(app, host=HTTP_HOST, port=HTTP_PORT, log_level='info')
+
+
 def main():
     """Run the MCP server"""
     logger.info("Starting Semantic Nebula MCP server...")
@@ -1545,7 +1625,10 @@ def main():
     if WARM_EMBEDDINGS_ON_STARTUP:
         start_embedding_warmup(delay_seconds=EMBEDDING_WARMUP_DELAY_SECONDS)
         logger.info(f"Embedding warmup scheduled in {EMBEDDING_WARMUP_DELAY_SECONDS:.1f}s")
-    mcp.run(transport="stdio")
+    if TRANSPORT == 'http':
+        run_http()
+    else:
+        mcp.run(transport="stdio")
 
 
 if __name__ == "__main__":

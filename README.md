@@ -7,6 +7,7 @@
 
 Recent updates:
 
+- 31.10.2026 - **Optional home-server mode** (v1.5.0) — run Nebula on an always-on machine and connect to it over your network, with optional token auth. stdio stays the default, so nothing changes unless you turn it on. See [Running on a home server](#running-on-a-home-server-optional).
 - 31.10.2026 - **Shared memory for multiple residents** (v1.4.0) — several AI residents (any model, not just Claude) can share one `shared.db` and still favour their own memories in search. Compatible with Pulse's resident memories. See [Shared Memory for Multiple Residents](#shared-memory-for-multiple-residents).
 - 31.10.2026 - **mcp 2.x HOTFIX** (v1.3.1) — `mcp` 2.0 removed `FastMCP`, so fresh installs crashed on startup. The auto-installer now pins `mcp<2`, and an existing 2.x install gets a clear fix-it message instead of a traceback. Thanks Coro & Cari for the report!
 - 03.07.2026 - **Renamed to Semantic Nebula** (v1.3.0) — Claude Desktop hides tools from "Claude"-named extensions; see the notice above. No functional changes.
@@ -180,7 +181,7 @@ The extension asks for:
 
 You can change these at any time in Claude Desktop settings.
 
-When running the server manually, the same settings are environment variables: `CLAUDE_MEMORIES_DIR`, `NEBULA_RESIDENT_ID`, and `CLAUDE_MEMORY_EMBEDDING_MODEL` (see below).
+When running the server manually, the same settings are environment variables: `CLAUDE_MEMORIES_DIR`, `NEBULA_RESIDENT_ID`, and `CLAUDE_MEMORY_EMBEDDING_MODEL` (see below). The `NEBULA_TRANSPORT` / `NEBULA_HTTP_*` / `NEBULA_AUTH_TOKEN` variables are for [home-server mode](#running-on-a-home-server-optional).
 
 ### Using a different embedding model
 
@@ -219,11 +220,78 @@ python -c "from sentence_transformers import SentenceTransformer; SentenceTransf
 - Models that need special query/passage prefixes or that score on a different similarity scale (such as the `e5` family) aren't supported yet. In particular, the duplicate check (similarity above 0.9) would misfire.
 - 384-dimension models are the tested path.
 
+### Running on a home server (optional)
+
+By default, each Claude app launches its own copy of Nebula over stdio, and that is all most people need. If you have an always-on machine (say, a Linux box that also runs Pulse), you can run Nebula there once and have your other computers connect to it over the network. One machine owns `shared.db`, and every app sees the same memories.
+
+> [!WARNING]
+> **Don't put `shared.db` on a network share (SMB/NFS) instead.** SQLite's WAL mode doesn't work over network filesystems, and the database can be corrupted. Keep the database on the server's own disk and let the apps connect to the server.
+
+**On the server**, set these environment variables and run `mcp_server.py` (for example as a systemd service):
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `NEBULA_TRANSPORT` | `stdio` | Set to `http` to serve over Streamable HTTP |
+| `NEBULA_HTTP_HOST` | `127.0.0.1` | Address to listen on. Use `0.0.0.0` to accept connections from other machines |
+| `NEBULA_HTTP_PORT` | `8000` | Port to listen on |
+| `NEBULA_AUTH_TOKEN` | *(none)* | If set, every request must send `Authorization: Bearer <token>` |
+
+```bash
+export CLAUDE_MEMORIES_DIR=~/.claude-memories
+export NEBULA_TRANSPORT=http
+export NEBULA_HTTP_HOST=0.0.0.0
+export NEBULA_AUTH_TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
+python3 mcp_server.py
+```
+
+Generate the token once and store it in your service config. Without a token, anyone who can reach the port can read and change your memories, and the server logs a warning when it listens beyond localhost without one. The endpoint is `http://<server>:8000/mcp`.
+
+**From Claude Code:**
+
+```bash
+claude mcp add --transport http semantic-nebula http://<server>:8000/mcp --header "Authorization: Bearer <token>"
+```
+
+**From Claude Desktop**, bridge to the server with [`mcp-remote`](https://www.npmjs.com/package/mcp-remote) (requires Node.js). Install it once, pinned, rather than running it through `npx`: Desktop starts several copies at launch, and `npx` resolving them all at once can take long enough for Desktop to time out.
+
+```bash
+npm install -g mcp-remote@0.15.2
+```
+
+Then add a manual entry to `claude_desktop_config.json` that runs it with `node` (`npm root -g` prints where it was installed). `--allow-http` is needed for a plain-HTTP address on your LAN:
+
+```json
+{
+  "mcpServers": {
+    "semantic-nebula": {
+      "command": "C:\\Program Files\\nodejs\\node.exe",
+      "args": [
+        "C:\\Users\\<you>\\AppData\\Roaming\\npm\\node_modules\\mcp-remote\\dist\\proxy.js",
+        "http://<server>:8000/mcp", "--allow-http",
+        "--header", "Authorization:${NEBULA_AUTH_HEADER}"
+      ],
+      "env": {
+        "NEBULA_AUTH_HEADER": "Bearer <token>"
+      }
+    }
+  }
+}
+```
+
+Turn off the Semantic Nebula extension in Desktop's settings, or Desktop keeps writing to its local database alongside the server.
+
+**Good to know:**
+- Both of these connect from your own computer, so the server only has to be reachable on your home network or a private network like [Tailscale](https://tailscale.com/).
+- **Custom connectors on claude.ai** (Settings → Connectors) work differently: Anthropic's cloud makes the connection, so the server would need a public HTTPS address, and custom connectors can't send a bearer token. Nebula doesn't support that setup yet.
+- `visualize_memories` opens the dashboard in a browser on the *server*, so it isn't useful on a headless machine.
+- **Antivirus web filters can stall plain HTTP.** Avast's Web Shield (and likely AVG, which shares its engine) rewrites MCP's empty `202 Accepted` replies so that clients wait until the server closes the connection. Nebula closes those connections right away to work around it, but the cleanest fix is an exception for `http://<server>:8000/*` in the antivirus's web shield settings.
+
 ## Privacy & Security
 
 - All memories are stored locally on your computer
 - The extension only accesses the directory you specify
 - No data is sent to external servers
+- In the optional [home-server mode](#running-on-a-home-server-optional), memories travel over your own network. Set `NEBULA_AUTH_TOKEN` whenever the server listens beyond localhost
 - The SQLite database can be backed up, moved, or inspected with any SQLite tool
 
 ## Development
