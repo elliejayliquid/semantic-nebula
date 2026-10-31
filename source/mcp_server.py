@@ -40,18 +40,34 @@ def install_missing_dependencies(dependencies: dict[str, str], context: str = "O
 
 def check_and_install_dependencies():
     """Check startup dependencies and install them if missing."""
+    # mcp 2.x renamed FastMCP to MCPServer and removed mcp.server.fastmcp
     dependencies = {
-        "mcp": "mcp",
+        "mcp": "mcp>=1.2,<2",
         "numpy": "numpy"
     }
     if not install_missing_dependencies(dependencies):
-        print("Please try running 'pip install mcp numpy' manually.", file=sys.stderr)
+        print("Please try running 'pip install \"mcp<2\" numpy' manually.", file=sys.stderr)
         sys.exit(1)
 
 # Run dependency check before anything else
 check_and_install_dependencies()
 
-from mcp.server.fastmcp import FastMCP
+try:
+    from mcp.server.fastmcp import FastMCP
+except ImportError:
+    # An existing mcp 2.x install passes the presence check above but lacks FastMCP
+    try:
+        from importlib.metadata import version as _pkg_version
+        _mcp_version = _pkg_version("mcp")
+    except Exception:
+        _mcp_version = "unknown"
+    print(
+        f"Error: Semantic Nebula requires mcp 1.x, but mcp {_mcp_version} is installed "
+        f"for {sys.executable}.\n"
+        "Fix it by running: pip install \"mcp<2\"",
+        file=sys.stderr
+    )
+    sys.exit(1)
 import numpy as np
 
 # Configure logging to stderr (NOT stdout!)

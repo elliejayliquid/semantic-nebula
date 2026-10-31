@@ -7,6 +7,7 @@
 
 Recent updates:
 
+- 31.10.2026 - **mcp 2.x HOTFIX** (v1.3.1) — `mcp` 2.0 removed `FastMCP`, so fresh installs crashed on startup. The auto-installer now pins `mcp<2`, and an existing 2.x install gets a clear fix-it message instead of a traceback. Thanks Coro & Cari for the report!
 - 03.07.2026 - **Renamed to Semantic Nebula** (v1.3.0) — Claude Desktop hides tools from "Claude"-named extensions; see the notice above. No functional changes.
 - 03.07.2026 - **Claude Desktop App HOTFIX** - embedding model now loads
 as a subprocess, stopping the MCP from stalling and crashing.
@@ -40,13 +41,16 @@ A persistent semantic memory system for Claude Desktop that uses vector embeddin
 **Python 3.10 or higher** with the following packages installed:
 
 ```bash
-pip install mcp sentence-transformers numpy
+pip install "mcp<2" sentence-transformers numpy
 ```
+
+> [!IMPORTANT]
+> **Use mcp 1.x.** `mcp` 2.0 (July 2026) renamed `FastMCP` to `MCPServer`, and Semantic Nebula still runs on 1.x. If the server exits with `No module named 'mcp.server.fastmcp'`, run `pip install "mcp<2"` for the Python that Claude Desktop launches.
 
 **Note**: The MCP server starts quickly, then warms the embedding model in a background worker process. Embedding-capable tools (`add_memory`, `search_memory`, `write_journal`, or `search_journal`) will say the model is warming if called before it is ready. Embedding tools use the local cache by default so Hugging Face certificate/network issues cannot stall MCP calls. To pre-warm the cache, run: `python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"`. Set `CLAUDE_MEMORY_ALLOW_MODEL_DOWNLOAD=1` only if you explicitly want the server to contact Hugging Face at runtime. Set `CLAUDE_MEMORY_EMBEDDING_WARMUP_DELAY_SECONDS` to tune the background warmup delay (default: 10). Set `CLAUDE_MEMORY_EMBEDDING_WARMUP_TIMEOUT_SECONDS` to tune how long the server waits for the worker to become ready before reporting failure (default: 120).
 
 > [!TIP]
-> **One-Click Ready**: If you have Python installed but forgot the libraries, the extension will automatically detect and install startup dependencies (`mcp`, `numpy`) on first run. `sentence-transformers` is installed lazily the first time an embedding-capable tool needs it.
+> **One-Click Ready**: If you have Python installed but forgot the libraries, the extension will automatically detect and install startup dependencies (`mcp<2`, `numpy`) on first run. `sentence-transformers` is installed lazily the first time an embedding-capable tool needs it.
 
 ### Install the Extension
 
@@ -163,7 +167,7 @@ git clone https://github.com/elliejayliquid/semantic-nebula.git
 cd semantic-nebula/source
 
 # Install dependencies
-pip install mcp sentence-transformers numpy
+pip install "mcp<2" sentence-transformers numpy
 
 # Install MCPB toolchain
 npm install -g @anthropic-ai/mcpb
@@ -184,7 +188,7 @@ This creates `semantic-nebula.mcpb` ready for installation!
 **Extension won't install**
 
 - Ensure Python 3.10+ is installed: `python --version`
-- Install required packages: `pip install mcp sentence-transformers numpy`
+- Install required packages: `pip install "mcp<2" sentence-transformers numpy`
 
 **Model download fails**
 
