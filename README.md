@@ -178,9 +178,46 @@ The extension asks for:
 - **Memories Directory**: Where to store the `shared.db` database (default: `~/.claude-memories`)
 - **Resident ID** (optional): default owner for new memories when only one resident uses this install. Leave it empty if several residents share it (see [Shared Memory for Multiple Residents](#shared-memory-for-multiple-residents)).
 
-When running the server manually, the same settings are environment variables: `CLAUDE_MEMORIES_DIR`, `NEBULA_RESIDENT_ID`, and `CLAUDE_MEMORY_EMBEDDING_MODEL` (default `all-MiniLM-L6-v2`; any 384-dimension sentence-transformers model works, e.g. `paraphrase-multilingual-MiniLM-L12-v2` for non-English memories. Choose it **before** storing memories: switching models later leaves existing embeddings incompatible).
+You can change these at any time in Claude Desktop settings.
 
-You can change this location at any time in Claude Desktop settings.
+When running the server manually, the same settings are environment variables: `CLAUDE_MEMORIES_DIR`, `NEBULA_RESIDENT_ID`, and `CLAUDE_MEMORY_EMBEDDING_MODEL` (see below).
+
+### Using a different embedding model
+
+By default, memories are embedded with `all-MiniLM-L6-v2`: small, fast, and English-focused. You can use your own [sentence-transformers](https://www.sbert.net/) model instead, for example for memories in other languages.
+
+> [!WARNING]
+> **Pick your model before you store memories, and then stick with it.** Each model places meaning in its own vector space, so embeddings from two different models can't be compared. If you switch models on an existing database, **nothing crashes and nothing warns you**: old memories just quietly stop matching new searches. The same applies to anything else sharing your `shared.db` (such as Pulse): every program must use the same model.
+
+**Recommended multilingual model:** `paraphrase-multilingual-MiniLM-L12-v2` covers 50+ languages and has the same 384 dimensions, and a memory written in one language can be found with a query in another. Thanks to Coro & Cari for testing it 🦊
+
+**How to set it:** the extension settings don't offer a model choice, so run the server as a manual entry in `claude_desktop_config.json` (ideally with its own Python venv) and set `CLAUDE_MEMORY_EMBEDDING_MODEL`:
+
+```json
+{
+  "mcpServers": {
+    "semantic-nebula": {
+      "command": "C:/path/to/venv/Scripts/python.exe",
+      "args": ["C:/path/to/semantic-nebula/source/mcp_server.py"],
+      "env": {
+        "CLAUDE_MEMORIES_DIR": "C:/path/to/your/memories",
+        "CLAUDE_MEMORY_EMBEDDING_MODEL": "paraphrase-multilingual-MiniLM-L12-v2"
+      }
+    }
+  }
+}
+```
+
+The server only loads models from the local cache by default, so download the model once first:
+
+```bash
+python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2')"
+```
+
+**Good to know:**
+- `paraphrase-multilingual-MiniLM-L12-v2` reads up to about 128 tokens per memory, half of the default model's 256. Anything past that in a very long memory is ignored when searching.
+- Models that need special query/passage prefixes or that score on a different similarity scale (such as the `e5` family) aren't supported yet. In particular, the duplicate check (similarity above 0.9) would misfire.
+- 384-dimension models are the tested path.
 
 ## Privacy & Security
 
