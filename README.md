@@ -1,9 +1,9 @@
 # Semantic Nebula
 
-*A persistent semantic memory system for Claude — formerly known as **Claude's Semantic Memory System***
+*A persistent semantic memory system for AI — formerly known as **Claude's Semantic Memory System***
 
 > [!IMPORTANT]
-> **Why the rename?** As of mid-2026, Claude Desktop silently hides MCP tools from any extension with "Claude" in its manifest `name` or `display_name` — most likely an anti-impersonation guard. The extension UI still shows the tools as enabled, but the model never receives them and no error is logged anywhere, which makes it look like the extension is simply broken. The tool names themselves (`add_memory`, `search_memory`, etc.) are unaffected — only the extension's identity matters. So *Claude's Semantic Memory System* became **Semantic Nebula** (v1.3.0), named after its memory visualizer. Same code, same tools, same database — if you're upgrading, just point it at your existing memories directory. If your own extension's tools mysteriously vanished from Claude's roster: check its name first.
+> **Why the rename?** As of mid-2026, Claude Desktop, which this MCP was originally created for, silently hides MCP tools from any extension with "Claude" in its manifest `name` or `display_name` — most likely an anti-impersonation guard. The extension UI still shows the tools as enabled, but the model never receives them and no error is logged anywhere, which makes it look like the extension is simply broken. The tool names themselves (`add_memory`, `search_memory`, etc.) are unaffected — only the extension's identity matters. So *Claude's Semantic Memory System* became **Semantic Nebula** (v1.3.0), named after its memory visualizer. Same code, same tools, same database — if you're upgrading, just point it at your existing memories directory. If your own extension's tools mysteriously vanished from Claude's roster: check its name first.
 
 Recent updates:
 
