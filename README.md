@@ -7,6 +7,7 @@
 
 Recent updates:
 
+- 31.10.2026 - **Shared memory for multiple residents** (v1.4.0) — several AI residents (any model, not just Claude) can share one `shared.db` and still favour their own memories in search. Compatible with Pulse's resident memories. See [Shared Memory for Multiple Residents](#shared-memory-for-multiple-residents).
 - 31.10.2026 - **mcp 2.x HOTFIX** (v1.3.1) — `mcp` 2.0 removed `FastMCP`, so fresh installs crashed on startup. The auto-installer now pins `mcp<2`, and an existing 2.x install gets a clear fix-it message instead of a traceback. Thanks Coro & Cari for the report!
 - 03.07.2026 - **Renamed to Semantic Nebula** (v1.3.0) — Claude Desktop hides tools from "Claude"-named extensions; see the notice above. No functional changes.
 - 03.07.2026 - **Claude Desktop App HOTFIX** - embedding model now loads
@@ -103,6 +104,33 @@ The journal system provides structured, persistent journaling with semantic sear
 
 > **Note**: Journal entries are private to the journal system. They do **not** appear in the memory visualizer, `list_memories`, or `get_context_summary`. They *are* included in `search_memory` results (marked with their type) so that semantic search can draw on the full knowledge base.
 
+## Shared Memory for Multiple Residents
+
+One `shared.db` can serve several AI residents at once: different personas, different models, local or cloud. Sharing gives everyone the full history. The risk is that residents start to blur together, because another resident's memories can outrank your own. Resident IDs fix that.
+
+- **Ownership**: each memory can record the `resident_id` of the resident it belongs to (case-insensitive, e.g. `valentine`). A resident ID is simply the name a resident goes by: there's no list to register in, and a newcomer becomes a resident the first time it uses its own name. What matters is using the *same* name every time. Memories without an ID belong to nobody in particular, and every memory written before v1.4.0 starts that way.
+- **Gentle affinity**: when a resident passes its ID to `search_memory` or `search_journal`, its own memories get a small **+0.02** score boost. This only breaks near-ties: a clearly more relevant memory from another resident still wins, and nothing is hidden.
+- **Visible owners**: search results and `list_memories` show `by <resident>` on owned memories, so a resident can tell its own experiences from someone else's.
+
+**Telling a resident its ID.** There are two ways:
+
+1. **Per call**: add a line like this to the resident's instructions. It's the right choice when several residents share one install (for example several personas in Claude Desktop):
+   > Your Semantic Nebula resident_id is `valentine`. Pass it as `resident_id` to `add_memory`, `search_memory`, `search_journal` and `write_journal`.
+2. **Default for the install**: set the `NEBULA_RESIDENT_ID` environment variable, or the optional *Resident ID* field in the extension settings. It's used whenever a call doesn't pass `resident_id`. Only set it if a **single** resident uses that install, otherwise every resident's memories get recorded as that one resident's.
+
+For `write_journal`, the owner is the explicit `resident_id` if given, otherwise the `author` name the resident signs with. `NEBULA_RESIDENT_ID` is never applied to journals, so a resident's own name always wins over the install-wide default. `update_memory` only changes the owner when you pass `resident_id`.
+
+> **Pulse users**: Pulse records each persona's name as its resident ID. Use the same IDs here (e.g. `sunshine`) so a resident is recognised as the same one in Pulse and in Semantic Nebula.
+
+**Backfilling journal owners.** Journal companion memories from before v1.4.0 can be attributed from their entry's author. Each author becomes its own resident, exactly as they signed. Run a dry run first to see the plan. If one resident used several spellings of its name over time, `--map` merges them, and `--skip` leaves an author's entries without an owner:
+
+```bash
+python scripts/backfill_resident_ids.py --db ~/.claude-memories/shared.db
+python scripts/backfill_resident_ids.py --db ~/.claude-memories/shared.db --map "old-author=resident" --apply
+```
+
+`--apply` saves a backup copy of the database next to it before writing, and never changes a memory that already has an owner.
+
 ---
 
 ## How It Works
@@ -136,6 +164,7 @@ All data lives in `{memories_directory}/shared.db`, a SQLite database with WAL m
 **memories** — each row stores:
 - `id` (integer, auto-increment), `text`, `date`, `tags` (JSON array), `type`, `importance` (1-10)
 - `retrieval_count`, `last_accessed` — for retrieval boosting
+- `resident_id` — the resident the memory belongs to, or empty (see [Shared Memory for Multiple Residents](#shared-memory-for-multiple-residents))
 - `embedding` — 384-dim float32 BLOB
 
 **journal_entries** — each row stores:
@@ -144,9 +173,12 @@ All data lives in `{memories_directory}/shared.db`, a SQLite database with WAL m
 
 ## Configuration
 
-The extension asks for one configuration parameter:
+The extension asks for:
 
 - **Memories Directory**: Where to store the `shared.db` database (default: `~/.claude-memories`)
+- **Resident ID** (optional): default owner for new memories when only one resident uses this install. Leave it empty if several residents share it (see [Shared Memory for Multiple Residents](#shared-memory-for-multiple-residents)).
+
+When running the server manually, the same settings are environment variables: `CLAUDE_MEMORIES_DIR`, `NEBULA_RESIDENT_ID`, and `CLAUDE_MEMORY_EMBEDDING_MODEL` (default `all-MiniLM-L6-v2`; any 384-dimension sentence-transformers model works, e.g. `paraphrase-multilingual-MiniLM-L12-v2` for non-English memories. Choose it **before** storing memories: switching models later leaves existing embeddings incompatible).
 
 You can change this location at any time in Claude Desktop settings.
 
@@ -249,6 +281,8 @@ You have access to a semantic memory system. Use it to maintain continuity acros
    - `general`: Any other persistent information.
 
 6. **Natural Interaction**: Use tools silently and naturally; do not announce that you are "checking memory." Your relationship with this person should feel continuous and warm, not like you're constantly consulting a database.
+
+7. **Shared memory (optional)**: If you share this memory with other AI residents, your resident_id is `your-name-here`. Pass it as `resident_id` to `add_memory`, `search_memory`, `search_journal` and `write_journal`. Search results marked `by <someone else>` are their memories, not yours.
 ```
 
 <div class="container", align="center">

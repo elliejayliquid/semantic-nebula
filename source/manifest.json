@@ -2,7 +2,7 @@
   "dxt_version": "0.1",
   "name": "semantic-nebula",
   "display_name": "Semantic Nebula",
-  "version": "1.3.1",
+  "version": "1.4.0",
   "description": "A semantic memory system that lets Claude store and search memories using vector embeddings",
   "long_description": "This extension gives Claude a persistent semantic memory system. Memories are stored as vector embeddings, allowing Claude to search for related memories by meaning rather than just keywords. The system tracks retrieval patterns and boosts frequently accessed memories, mimicking how human memory works.\n\nMemories are stored in a configurable directory on your local machine and are never sent to external servers. This extension only accesses the directory you specify for storing memories - it does not access any other files on your computer.",
   "author": {
@@ -21,7 +21,8 @@
         "${__dirname}/mcp_server.py"
       ],
       "env": {
-        "CLAUDE_MEMORIES_DIR": "${user_config.memories_directory}"
+        "CLAUDE_MEMORIES_DIR": "${user_config.memories_directory}",
+        "NEBULA_RESIDENT_ID": "${user_config.resident_id}"
       }
     }
   },
@@ -112,6 +113,13 @@
       "description": "Where to store your semantic memories. This extension ONLY accesses this directory - no other files on your computer. Memories are stored in a shared.db SQLite database.",
       "required": true,
       "default": "~/.claude-memories"
+    },
+    "resident_id": {
+      "type": "string",
+      "title": "Resident ID (optional)",
+      "description": "Only if a single AI resident uses this install: its resident ID (e.g. 'valentine'), recorded as the default owner of new memories. Leave empty when several residents share this install; each can pass its own resident_id instead.",
+      "required": false,
+      "default": ""
     }
   }
 }

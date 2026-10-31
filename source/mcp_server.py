@@ -78,6 +78,23 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
+def normalize_resident_id(value: object) -> Optional[str]:
+    """Return the stable, case-insensitive identifier stored on memory rows."""
+    normalized = str(value or "").strip().lower()
+    return normalized or None
+
+
+def resolve_resident_id(value: object) -> Optional[str]:
+    """Return an explicit resident ID, falling back to NEBULA_RESIDENT_ID."""
+    return normalize_resident_id(value) or DEFAULT_RESIDENT_ID
+
+
+def _owner_label(mem: dict) -> str:
+    """Display suffix naming the resident a memory belongs to, if any."""
+    owner = normalize_resident_id(mem.get('resident_id'))
+    return f" by {owner}" if owner else ""
+
 # Initialize FastMCP server
 mcp = FastMCP("semantic-nebula")
 
@@ -93,6 +110,10 @@ ALLOW_MODEL_DOWNLOAD = os.environ.get('CLAUDE_MEMORY_ALLOW_MODEL_DOWNLOAD', '').
 WARM_EMBEDDINGS_ON_STARTUP = os.environ.get('CLAUDE_MEMORY_WARM_EMBEDDINGS_ON_STARTUP', '1').lower() not in {'0', 'false', 'no', 'off'}
 EMBEDDING_WARMUP_DELAY_SECONDS = float(os.environ.get('CLAUDE_MEMORY_EMBEDDING_WARMUP_DELAY_SECONDS', '10'))
 EMBEDDING_WARMUP_TIMEOUT_SECONDS = float(os.environ.get('CLAUDE_MEMORY_EMBEDDING_WARMUP_TIMEOUT_SECONDS', '120'))
+# Default owner for single-resident setups; model-agnostic name on purpose.
+# An unset optional .mcpb field can arrive as a literal "${user_config...}".
+_raw_resident_id = os.environ.get('NEBULA_RESIDENT_ID', '')
+DEFAULT_RESIDENT_ID = None if _raw_resident_id.startswith('${') else normalize_resident_id(_raw_resident_id)
 model: Optional[object] = None
 embedding_worker: Optional[object] = None
 model_error: Optional[str] = None
@@ -123,6 +144,7 @@ CREATE TABLE IF NOT EXISTS memories (
     supersedes      INTEGER,
     journal_file    TEXT,
     date            TEXT NOT NULL DEFAULT (datetime('now')),
+    resident_id     TEXT,
     embedding       BLOB
 );
 CREATE INDEX IF NOT EXISTS idx_memories_type ON memories(type, date DESC);
@@ -156,6 +178,10 @@ class MemoryDatabase:
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA foreign_keys=ON")
         self.conn.executescript(_SCHEMA)
+        try:
+            self.conn.execute("ALTER TABLE memories ADD COLUMN resident_id TEXT")
+        except sqlite3.OperationalError:
+            pass  # Column already exists
         self.conn.commit()
         logger.info(f"Database opened: {self.db_path}")
 
@@ -169,21 +195,24 @@ class MemoryDatabase:
                     embedding: Optional[bytes] = None,
                     supersedes: Optional[int] = None,
                     journal_file: Optional[str] = None,
-                    date: Optional[str] = None) -> int:
+                    date: Optional[str] = None,
+                    resident_id: Optional[str] = None) -> int:
         tags_json = json.dumps(tags or [])
+        resident_id = normalize_resident_id(resident_id)
         if date:
             cur = self.conn.execute(
                 "INSERT INTO memories (text, tags, type, importance, embedding, "
-                "supersedes, journal_file, date) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "supersedes, journal_file, date, resident_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (text, tags_json, type, importance, embedding,
-                 supersedes, journal_file, date)
+                 supersedes, journal_file, date, resident_id)
             )
         else:
             cur = self.conn.execute(
                 "INSERT INTO memories (text, tags, type, importance, embedding, "
-                "supersedes, journal_file) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "supersedes, journal_file, resident_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (text, tags_json, type, importance, embedding,
-                 supersedes, journal_file)
+                 supersedes, journal_file, resident_id)
             )
         self.conn.commit()
         return cur.lastrowid
@@ -784,7 +813,9 @@ def _search_memories_core(
     query: str,
     memories: list[dict[str, Any]],
     top_k: int,
-    embedding_model: object
+    embedding_model: object,
+    resident_id: Optional[str] = None,
+    resident_affinity_weight: float = 0.02,
 ) -> list[tuple[int, float, float, float]]:
     """Core search logic: matrix multiplication + vectorized boosting.
 
@@ -793,6 +824,8 @@ def _search_memories_core(
         memories: List of memory dicts, each must have 'embedding' (BLOB bytes)
         top_k: Number of results to return
         embedding_model: Loaded sentence-transformer model
+        resident_id: Active resident whose memories receive a gentle tie-break boost
+        resident_affinity_weight: Additive boost for exact resident matches
 
     Returns:
         List of (index, base_similarity, final_score, total_boost)
@@ -832,8 +865,19 @@ def _search_memories_core(
         for m in memories
     ])
 
+    active_resident = normalize_resident_id(resident_id)
+    resident_boosts = np.array([
+        resident_affinity_weight
+        if active_resident and normalize_resident_id(m.get('resident_id')) == active_resident
+        else 0.0
+        for m in memories
+    ])
+
     # Final scores
-    final_scores = base_similarities + retrieval_boosts + importance_boosts + tag_boosts
+    final_scores = (
+        base_similarities + retrieval_boosts + importance_boosts
+        + tag_boosts + resident_boosts
+    )
     top_k = min(top_k, len(memories))
     top_indices = np.argsort(final_scores)[-top_k:][::-1]
 
@@ -856,7 +900,8 @@ def add_memory(
     tags: str = "",
     importance: int = 5,
     memory_type: str = "general",
-    date: str = None
+    date: str = None,
+    resident_id: str = None,
 ) -> str:
     """Add a new memory to the semantic memory system.
 
@@ -866,6 +911,8 @@ def add_memory(
         importance: Importance rating from 1-10
         memory_type: Type of memory (general, achievement, milestone, etc)
         date: Optional YYYY-MM-DD date (defaults to today)
+        resident_id: Your resident ID (e.g. "valentine") so this memory is recorded
+            as yours. Omit it if you have none; NEBULA_RESIDENT_ID is used if set.
     """
     logger.info(f"Adding memory: {text[:50]}...")
 
@@ -910,7 +957,8 @@ def add_memory(
         type=memory_type,
         importance=importance,
         embedding=embedding_blob,
-        date=memory_date
+        date=memory_date,
+        resident_id=resolve_resident_id(resident_id),
     )
 
     logger.info(f"Memory #{memory_id} saved successfully")
@@ -923,7 +971,8 @@ def add_memory_force(
     tags: str = "",
     importance: int = 5,
     memory_type: str = "general",
-    date: str = None
+    date: str = None,
+    resident_id: str = None,
 ) -> str:
     """Force-add a memory, bypassing the duplicate similarity check.
     Use this only after add_memory has flagged a duplicate and you still want to save.
@@ -934,6 +983,8 @@ def add_memory_force(
         importance: Importance rating from 1-10
         memory_type: Type of memory (general, achievement, milestone, etc)
         date: Optional YYYY-MM-DD date (defaults to today)
+        resident_id: Your resident ID (e.g. "valentine") so this memory is recorded
+            as yours. Omit it if you have none; NEBULA_RESIDENT_ID is used if set.
     """
     importance = max(1, min(10, importance))
     tag_list = [t.strip() for t in tags.split(',') if t.strip()]
@@ -952,7 +1003,8 @@ def add_memory_force(
         type=memory_type,
         importance=importance,
         embedding=embedding_blob,
-        date=memory_date
+        date=memory_date,
+        resident_id=resolve_resident_id(resident_id),
     )
 
     return f"Memory #{memory_id} force-added: '{text[:50]}...'"
@@ -965,7 +1017,8 @@ def update_memory(
     tags: str = None,
     importance: int = None,
     memory_type: str = None,
-    date: str = None
+    date: str = None,
+    resident_id: str = None,
 ) -> str:
     """Update an existing memory by its ID. Only provided fields will be changed.
 
@@ -976,6 +1029,7 @@ def update_memory(
         importance: New importance rating (1-10)
         memory_type: New memory type
         date: New YYYY-MM-DD date
+        resident_id: New owning resident ID; omit to keep the current owner
     """
     logger.info(f"Updating memory: {memory_id}")
 
@@ -998,6 +1052,8 @@ def update_memory(
         fields["type"] = memory_type
     if date is not None:
         fields["date"] = date
+    if resident_id is not None:
+        fields["resident_id"] = normalize_resident_id(resident_id)
 
     if not fields:
         return "No fields to update."
@@ -1033,9 +1089,18 @@ def check_embedding_model() -> str:
 @mcp.tool()
 def search_memory(
         query: str,
-        top_k: int = 3
+        top_k: int = 3,
+        resident_id: str = None,
 ) -> str:
-    """Search for semantically similar memories using vectorized operations."""
+    """Search memories by meaning. In a shared memory pool, pass your resident ID
+    so your own memories win near-ties over other residents' memories.
+
+    Args:
+        query: What to search for in shared memory
+        top_k: Number of results (default 3, max 10)
+        resident_id: Your resident ID (e.g. "valentine"). Omit it if you have none;
+            NEBULA_RESIDENT_ID is used if set.
+    """
     logger.info(f"Searching for: {query}")
 
     top_k = max(1, min(10, top_k))
@@ -1050,7 +1115,10 @@ def search_memory(
     if embedding_model is None:
         return _embedding_unavailable("search memories")
 
-    results = _search_memories_core(query, memories_with_emb, top_k, embedding_model)
+    results = _search_memories_core(
+        query, memories_with_emb, top_k, embedding_model,
+        resident_id=resolve_resident_id(resident_id),
+    )
 
     logger.info(f"Found {len(results)} results")
     output_lines = [f"Found {len(memories_with_emb)} total memories, showing top {len(results)}:\n"]
@@ -1062,7 +1130,8 @@ def search_memory(
 
         db.update_retrieval(mem['id'])
 
-        output_lines.append(f"{i}. [{mem['id']}] ({mem_type}) Similarity: {final_score:.3f}{boost_str}")
+        output_lines.append(
+            f"{i}. [{mem['id']}] ({mem_type}){_owner_label(mem)} Similarity: {final_score:.3f}{boost_str}")
         output_lines.append(f"   {mem['text']}")
         output_lines.append(f"   Tags: {', '.join(mem['tags']) if mem['tags'] else 'none'}")
         output_lines.append(
@@ -1094,7 +1163,7 @@ def list_memories(limit: int = 10) -> str:
     output_lines = [f"Total memories: {total}\nShowing {len(memories)} most recent:\n"]
 
     for mem in memories:
-        output_lines.append(f"[{mem['id']}] {mem['date']} - {mem['text'][:80]}...")
+        output_lines.append(f"[{mem['id']}] {mem['date']}{_owner_label(mem)} - {mem['text'][:80]}...")
         tags_str = ', '.join(mem['tags']) if mem['tags'] else 'none'
         output_lines.append(f"  Tags: {tags_str}, Importance: {mem['importance']}/10, Type: {mem.get('type', 'general')}\n")
 
@@ -1153,6 +1222,7 @@ def visualize_memories() -> str:
             "tags": mem["tags"],
             "importance": mem["importance"],
             "retrieval_count": mem.get("retrieval_count", 0),
+            "resident_id": mem.get("resident_id"),
             "date": mem["date"],
             "embedding": _blob_to_vec(mem["embedding"]).tolist()
         })
@@ -1221,7 +1291,8 @@ def write_journal(
     author: str,
     tags: str = "",
     importance: int = 5,
-    summary: str = ""
+    summary: str = "",
+    resident_id: str = None,
 ) -> str:
     """Write a new journal entry. Creates a database record
     and a companion memory for semantic search.
@@ -1233,6 +1304,8 @@ def write_journal(
         tags: Comma-separated tags (e.g. "relationship,milestone")
         importance: Importance rating 1-10
         summary: Brief 1-2 sentence summary for search (auto-generated if empty)
+        resident_id: Your resident ID, if it differs from the author name.
+            Otherwise the author name is your resident ID.
     """
     logger.info(f"Writing journal entry: {title}")
 
@@ -1289,7 +1362,9 @@ def write_journal(
         importance=importance,
         embedding=embedding_blob,
         journal_file=entry_id,
-        date=date_str
+        date=date_str,
+        # The name a resident signs with beats the install-wide default
+        resident_id=normalize_resident_id(resident_id) or author,
     )
     logger.info(f"Companion memory #{memory_id} created for journal entry")
 
@@ -1341,12 +1416,14 @@ def read_journal_latest(count: int = 3) -> str:
 
 
 @mcp.tool()
-def search_journal(query: str, top_k: int = 3) -> str:
+def search_journal(query: str, top_k: int = 3, resident_id: str = None) -> str:
     """Search journal entries by semantic similarity.
 
     Args:
         query: What to search for (e.g. "that night we felt vulnerable")
         top_k: Number of results (default 3, max 10)
+        resident_id: Your resident ID (e.g. "valentine") so your own entries win
+            near-ties. Omit it if you have none; NEBULA_RESIDENT_ID is used if set.
     """
     logger.info(f"Searching journal for: {query}")
 
@@ -1362,7 +1439,10 @@ def search_journal(query: str, top_k: int = 3) -> str:
     if embedding_model is None:
         return _embedding_unavailable("search journal entries")
 
-    results = _search_memories_core(query, journal_with_emb, top_k, embedding_model)
+    results = _search_memories_core(
+        query, journal_with_emb, top_k, embedding_model,
+        resident_id=resolve_resident_id(resident_id),
+    )
 
     output_lines = [f"Found {len(journal_with_emb)} journal entries, showing top {len(results)}:\n"]
 
@@ -1382,7 +1462,7 @@ def search_journal(query: str, top_k: int = 3) -> str:
             display_summary = text
             entry_ref = 'unknown'
 
-        output_lines.append(f"{i}. [{mem['id']}] Similarity: {final_score:.3f}{boost_str}")
+        output_lines.append(f"{i}. [{mem['id']}]{_owner_label(mem)} Similarity: {final_score:.3f}{boost_str}")
         output_lines.append(f"   {display_summary}")
         output_lines.append(f"   Entry: {entry_ref}")
         output_lines.append(f"   Tags: {', '.join(mem['tags']) if mem['tags'] else 'none'}")
